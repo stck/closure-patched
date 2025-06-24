@@ -1,0 +1,274 @@
+name: Build and Release Sencha Closure Compiler Patch
+
+on:
+  push:
+    branches: [ main, master ]
+    tags: [ 'v*' ]
+  pull_request:
+    branches: [ main, master ]
+  workflow_dispatch:  # Allow manual triggering
+
+env:
+  JAVA_VERSION: '21'
+  JAVA_DISTRIBUTION: 'temurin'
+
+permissions:
+  contents: write
+  issues: write
+  pull-requests: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0  # Fetch full history for better release notes
+    
+    - name: Set up JDK ${{ env.JAVA_VERSION }}
+      uses: actions/setup-java@v4
+      with:
+        java-version: ${{ env.JAVA_VERSION }}
+        distribution: ${{ env.JAVA_DISTRIBUTION }}
+    
+    - name: Cache dependencies
+      uses: actions/cache@v4
+      with:
+        path: |
+          ~/.m2/repository
+          lib/
+        key: ${{ runner.os }}-deps-${{ hashFiles('download-libs.sh') }}
+        restore-keys: |
+          ${{ runner.os }}-deps-
+    
+    - name: Install system dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y curl jq unzip tree
+        
+        # Verify installations
+        echo "=== Installed versions ==="
+        java -version
+        javac -version
+        curl --version | head -1
+        jq --version
+        unzip -v | head -1
+        jar --version || echo "jar command available"
+        tree --version
+        echo "=========================="
+    
+    - name: Verify sencha.jar exists
+      run: |
+        if [ ! -f "input/sencha.jar" ]; then
+          echo "ERROR: input/sencha.jar is required but not found!"
+          echo "Please ensure input/sencha.jar is committed to the repository."
+          exit 1
+        fi
+        
+        echo "sencha.jar found:"
+        ls -lh input/sencha.jar
+    
+    - name: Make scripts executable
+      run: |
+        chmod +x download-libs.sh
+        chmod +x build.sh
+        chmod +x create-patch.sh
+    
+    - name: Create patch
+      run: |
+        echo "Starting patch creation process..."
+        ./create-patch.sh
+    
+    - name: Verify patch creation
+      run: |
+        echo "=== Patch verification ==="
+        if [ ! -d "patch" ]; then
+          echo "ERROR: patch directory not created!"
+          exit 1
+        fi
+        
+        echo "Patch contents:"
+        tree patch/ || find patch/ -type f | sort
+        
+        echo ""
+        echo "Patch file sizes:"
+        find patch/ -type f -exec ls -lh {} \; | awk '{print $9 " (" $5 ")"}'
+        
+        echo ""
+        echo "Total patch size:"
+        du -sh patch/
+        
+        # Verify required files exist
+        required_files=(
+          "patch/sencha.jar"
+          "patch/README.md"
+          "patch/dependencies.properties"
+        )
+        
+        for file in "${required_files[@]}"; do
+          if [ ! -f "$file" ]; then
+            echo "ERROR: Required file $file not found!"
+            exit 1
+          fi
+        done
+        
+        echo "All required files present ✓"
+    
+    - name: Generate release info
+      id: release_info
+      run: |
+        # Get commit message and sanitize it for use as tag
+        COMMIT_MESSAGE=$(git log -1 --pretty=format:'%s')
+        
+        # Sanitize commit message for use in tag and filename
+        # Remove special characters and replace spaces with hyphens
+        SANITIZED_COMMIT=$(echo "$COMMIT_MESSAGE" | sed 's/[^a-zA-Z0-9 \.]//g' | sed 's/ /-/g' | tr '[:upper:]' '[:lower:]')
+        
+        # Use commit message as tag and release name
+        RELEASE_TAG="$SANITIZED_COMMIT"
+        RELEASE_NAME="$COMMIT_MESSAGE"
+        
+        echo "release_tag=$RELEASE_TAG" >> $GITHUB_OUTPUT
+        echo "release_name=$RELEASE_NAME" >> $GITHUB_OUTPUT
+        echo "commit_message=$COMMIT_MESSAGE" >> $GITHUB_OUTPUT
+        
+        echo "Original commit message: $COMMIT_MESSAGE"
+        echo "Sanitized tag: $RELEASE_TAG"
+        
+        # Generate simple release notes
+        echo "$COMMIT_MESSAGE" > release_notes.md
+        
+        echo "Release notes generated:"
+        cat release_notes.md
+    
+    - name: Create release archive
+      run: |
+        # Create a zip archive of the patch
+        cd patch
+        zip -r "../sencha-patched-${{ steps.release_info.outputs.release_tag }}.zip" .
+        cd ..
+        
+        echo "Archive created:"
+        ls -lh sencha-patched-${{ steps.release_info.outputs.release_tag }}.zip
+    
+    - name: Upload patch artifacts
+      uses: actions/upload-artifact@v4
+      with:
+        name: sencha-patched-${{ steps.release_info.outputs.release_tag }}
+        path: |
+          patch/
+          sencha-patched-${{ steps.release_info.outputs.release_tag }}.zip
+          release_notes.md
+        retention-days: 90
+    
+    - name: Create release archive with checksums
+      run: |
+        # Create archive with checksums
+        ARCHIVE_NAME="sencha-patched-${{ steps.release_info.outputs.release_tag }}.zip"
+        
+        # Create SHA256 checksum
+        sha256sum "$ARCHIVE_NAME" > "$ARCHIVE_NAME.sha256"
+        
+        # Create MD5 checksum for additional verification
+        md5sum "$ARCHIVE_NAME" > "$ARCHIVE_NAME.md5"
+        
+        echo "=== Archive Information ==="
+        ls -lh "$ARCHIVE_NAME"
+        echo ""
+        echo "=== Checksums ==="
+        echo "SHA256:"
+        cat "$ARCHIVE_NAME.sha256"
+        echo "MD5:"
+        cat "$ARCHIVE_NAME.md5"
+        echo ""
+        echo "=== Archive Contents ==="
+        unzip -l "$ARCHIVE_NAME"
+    
+    - name: Create GitHub Release
+      if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master' || startsWith(github.ref, 'refs/tags/'))
+      uses: softprops/action-gh-release@v1
+      with:
+        tag_name: ${{ steps.release_info.outputs.release_tag }}
+        name: ${{ steps.release_info.outputs.release_name }}
+        body_path: release_notes.md
+        files: |
+          sencha-patched-${{ steps.release_info.outputs.release_tag }}.zip
+          sencha-patched-${{ steps.release_info.outputs.release_tag }}.zip.sha256
+          sencha-patched-${{ steps.release_info.outputs.release_tag }}.zip.md5
+        generate_release_notes: true
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    
+    - name: Comment on PR (if applicable)
+      if: github.event_name == 'pull_request'
+      uses: actions/github-script@v7
+      with:
+        script: |
+          const fs = require('fs');
+          const path = require('path');
+          
+          // Read patch information
+          let patchInfo = '';
+          try {
+            const depsPath = 'patch/dependencies.properties';
+            if (fs.existsSync(depsPath)) {
+              patchInfo = fs.readFileSync(depsPath, 'utf8');
+            }
+          } catch (error) {
+            patchInfo = 'Could not read patch information';
+          }
+          
+          const comment = `## 🔧 Patch Build Completed
+          
+          The Sencha Closure Compiler patch has been successfully built for this PR.
+          
+          ### Patch Information
+          \`\`\`
+          ${patchInfo}
+          \`\`\`
+          
+          ### Download
+          You can download the patch artifacts from the [Actions tab](https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}).
+          
+          ### Files Generated
+          - \`sencha.jar\` - Patched Sencha framework
+          - \`lib/closure-compiler-*.jar\` - Latest Closure Compiler JARs
+          - \`README.md\` - Installation instructions
+          `;
+          
+          github.rest.issues.createComment({
+            issue_number: context.issue.number,
+            owner: context.repo.owner,
+            repo: context.repo.repo,
+            body: comment
+          });
+    
+    - name: Build summary
+      if: always()
+      run: |
+        echo "## Build Summary" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        
+        if [ -d "patch" ]; then
+          echo "✅ Patch created successfully" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Patch Contents" >> $GITHUB_STEP_SUMMARY
+          echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+          tree patch/ 2>/dev/null || find patch/ -type f | sort >> $GITHUB_STEP_SUMMARY
+          echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Patch Size" >> $GITHUB_STEP_SUMMARY
+          echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+          du -sh patch/ >> $GITHUB_STEP_SUMMARY
+          echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+        else
+          echo "❌ Patch creation failed" >> $GITHUB_STEP_SUMMARY
+        fi
+        
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "### Next Steps" >> $GITHUB_STEP_SUMMARY
+        echo "- Download the patch from the artifacts" >> $GITHUB_STEP_SUMMARY
+        echo "- Test the patched sencha.jar in your environment" >> $GITHUB_STEP_SUMMARY
+        echo "- Deploy to production if tests pass" >> $GITHUB_STEP_SUMMARY 

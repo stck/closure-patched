@@ -1,0 +1,51 @@
+# Build directories
+out/
+lib/
+patch/
+temp/
+
+# Compiled Java classes
+*.class
+
+# JAR files (except input sencha.jar which is required)
+*.jar
+!input/sencha.jar
+
+# Log files
+*.log
+
+# Dependencies info (generated)
+dependencies.properties
+
+# macOS
+.DS_Store
+
+# IDE files
+.idea/
+*.iml
+.project
+.classpath
+.settings/
+
+# VS Code
+.vscode/
+
+# Temporary files
+*.tmp
+*.temp
+*~
+
+# Backup files
+*.bak
+*.backup
+
+# Package Files
+*.tar.gz
+*.zip
+
+# Test files
+test/
+tests/
+
+# Release notes (generated)
+release_notes.md
